@@ -1238,7 +1238,7 @@ func (m *Reader) ReadMapStrIntf(mp map[string]interface{}) (err error) {
 }
 
 // ReadTime reads a time.Time object from the reader.
-// The returned time's location will be set to time.Local.
+// The returned time's location will be set to UTC.
 func (m *Reader) ReadTime() (t time.Time, err error) {
 	var p []byte
 	p, err = m.R.Peek(15)
@@ -1254,7 +1254,7 @@ func (m *Reader) ReadTime() (t time.Time, err error) {
 		return
 	}
 	sec, nsec := getUnix(p[3:])
-	t = time.Unix(sec, int64(nsec)).Local()
+	t = time.Unix(sec, int64(nsec)).UTC()
 	_, err = m.R.Skip(15)
 	return
 }
