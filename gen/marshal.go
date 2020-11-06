@@ -3,6 +3,7 @@ package gen
 import (
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/GannettDigital/msgp/msgp"
 )
@@ -17,6 +18,7 @@ type marshalGen struct {
 	passes
 	p    printer
 	fuse []byte
+	ctx  *Context
 }
 
 func (m *marshalGen) Method() Method { return Marshal }
@@ -36,6 +38,8 @@ func (m *marshalGen) Execute(p Elem) error {
 	if !IsPrintable(p) {
 		return nil
 	}
+
+	m.ctx = &Context{}
 
 	m.p.comment("MarshalMsg implements msgp.Marshaler")
 
@@ -95,28 +99,93 @@ func (m *marshalGen) tuple(s *Struct) {
 		if !m.p.ok() {
 			return
 		}
+		m.ctx.PushString(s.Fields[i].FieldName)
 		next(m, s.Fields[i].FieldElem)
+		m.ctx.Pop()
 	}
 }
 
 func (m *marshalGen) mapstruct(s *Struct) {
-	data := make([]byte, 0, 64)
-	data = msgp.AppendMapHeader(data, uint32(len(s.Fields)))
-	m.p.printf("\n// map header, size %d", len(s.Fields))
-	m.Fuse(data)
-	if len(s.Fields) == 0 {
-		m.fuseHook()
+
+	oeIdentPrefix := randIdent()
+
+	var data []byte
+	nfields := len(s.Fields)
+	bm := bmask{
+		bitlen:  nfields,
+		varname: oeIdentPrefix + "Mask",
 	}
+
+	omitempty := s.AnyHasTagPart("omitempty")
+	var fieldNVar string
+	if omitempty {
+
+		fieldNVar = oeIdentPrefix + "Len"
+
+		m.p.printf("\n// omitempty: check for empty values")
+		m.p.printf("\n%s := uint32(%d)", fieldNVar, nfields)
+		m.p.printf("\n%s", bm.typeDecl())
+		for i, sf := range s.Fields {
+			if !m.p.ok() {
+				return
+			}
+			if ize := sf.FieldElem.IfZeroExpr(); ize != "" && sf.HasTagPart("omitempty") {
+				m.p.printf("\nif %s {", ize)
+				m.p.printf("\n%s--", fieldNVar)
+				m.p.printf("\n%s", bm.setStmt(i))
+				m.p.printf("\n}")
+			}
+		}
+
+		m.p.printf("\n// variable map header, size %s", fieldNVar)
+		m.p.varAppendMapHeader("o", fieldNVar, nfields)
+		if !m.p.ok() {
+			return
+		}
+
+		// quick return for the case where the entire thing is empty, but only at the top level
+		if !strings.Contains(s.Varname(), ".") {
+			m.p.printf("\nif %s == 0 { return }", fieldNVar)
+		}
+
+	} else {
+
+		// non-omitempty version
+		data = make([]byte, 0, 64)
+		data = msgp.AppendMapHeader(data, uint32(len(s.Fields)))
+		m.p.printf("\n// map header, size %d", len(s.Fields))
+		m.Fuse(data)
+		if len(s.Fields) == 0 {
+			m.fuseHook()
+		}
+
+	}
+
 	for i := range s.Fields {
 		if !m.p.ok() {
 			return
 		}
+
+		// if field is omitempty, wrap with if statement based on the emptymask
+		oeField := s.Fields[i].HasTagPart("omitempty") && s.Fields[i].FieldElem.IfZeroExpr() != ""
+		if oeField {
+			m.p.printf("\nif %s == 0 { // if not empty", bm.readExpr(i))
+		}
+
 		data = msgp.AppendString(nil, s.Fields[i].FieldTag)
 
 		m.p.printf("\n// string %q", s.Fields[i].FieldTag)
 		m.Fuse(data)
+		m.fuseHook()
 
+		m.ctx.PushString(s.Fields[i].FieldName)
 		next(m, s.Fields[i].FieldElem)
+		m.ctx.Pop()
+
+		if oeField {
+			m.p.printf("\n}") // close if statement
+		}
+
 	}
 }
 
@@ -138,7 +207,9 @@ func (m *marshalGen) gMap(s *Map) {
 	m.rawAppend(mapHeader, lenAsUint32, vname)
 	m.p.printf("\nfor %s, %s := range %s {", s.Keyidx, s.Validx, vname)
 	m.rawAppend(stringTyp, literalFmt, s.Keyidx)
+	m.ctx.PushVar(s.Keyidx)
 	next(m, s.Value)
+	m.ctx.Pop()
 	m.p.closeblock()
 }
 
@@ -149,7 +220,7 @@ func (m *marshalGen) gSlice(s *Slice) {
 	m.fuseHook()
 	vname := s.Varname()
 	m.rawAppend(arrayHeader, lenAsUint32, vname)
-	m.p.rangeBlock(s.Index, vname, m, s.Els)
+	m.p.rangeBlock(m.ctx, s.Index, vname, m, s.Els)
 }
 
 func (m *marshalGen) gArray(a *Array) {
@@ -163,7 +234,7 @@ func (m *marshalGen) gArray(a *Array) {
 	}
 
 	m.rawAppend(arrayHeader, literalFmt, coerceArraySize(a.Size))
-	m.p.rangeBlock(a.Index, a.Varname(), m, a.Els)
+	m.p.rangeBlock(m.ctx, a.Index, a.Varname(), m, a.Els)
 }
 
 func (m *marshalGen) gPtr(p *Ptr) {
@@ -190,7 +261,7 @@ func (m *marshalGen) gBase(b *BaseElem) {
 			vname = randIdent()
 			m.p.printf("\nvar %s %s", vname, b.BaseType())
 			m.p.printf("\n%s, err = %s", vname, tobaseConvert(b))
-			m.p.printf(errcheck)
+			m.p.wrapErrCheck(m.ctx.ArgsStr())
 		}
 	}
 
@@ -207,6 +278,6 @@ func (m *marshalGen) gBase(b *BaseElem) {
 	}
 
 	if echeck {
-		m.p.print(errcheck)
+		m.p.wrapErrCheck(m.ctx.ArgsStr())
 	}
 }
