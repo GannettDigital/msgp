@@ -3,6 +3,7 @@ package gen
 import (
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/GannettDigital/msgp/msgp"
 )
@@ -17,6 +18,7 @@ type encodeGen struct {
 	passes
 	p    printer
 	fuse []byte
+	ctx  *Context
 }
 
 func (e *encodeGen) Method() Method { return Encode }
@@ -27,7 +29,7 @@ func (e *encodeGen) Apply(dirs []string) error {
 
 func (e *encodeGen) writeAndCheck(typ string, argfmt string, arg interface{}) {
 	e.p.printf("\nerr = en.Write%s(%s)", typ, fmt.Sprintf(argfmt, arg))
-	e.p.print(errcheck)
+	e.p.wrapErrCheck(e.ctx.ArgsStr())
 }
 
 func (e *encodeGen) fuseHook() {
@@ -56,6 +58,8 @@ func (e *encodeGen) Execute(p Elem) error {
 	if !IsPrintable(p) {
 		return nil
 	}
+
+	e.ctx = &Context{}
 
 	e.p.comment("EncodeMsg implements msgp.Encodable")
 
@@ -89,7 +93,9 @@ func (e *encodeGen) tuple(s *Struct) {
 		if !e.p.ok() {
 			return
 		}
+		e.ctx.PushString(s.Fields[i].FieldName)
 		next(e, s.Fields[i].FieldElem)
+		e.ctx.Pop()
 	}
 }
 
@@ -105,21 +111,85 @@ func (e *encodeGen) appendraw(bts []byte) {
 }
 
 func (e *encodeGen) structmap(s *Struct) {
+
+	oeIdentPrefix := randIdent()
+
+	var data []byte
 	nfields := len(s.Fields)
-	data := msgp.AppendMapHeader(nil, uint32(nfields))
-	e.p.printf("\n// map header, size %d", nfields)
-	e.Fuse(data)
-	if len(s.Fields) == 0 {
-		e.fuseHook()
+	bm := bmask{
+		bitlen:  nfields,
+		varname: oeIdentPrefix + "Mask",
 	}
+
+	omitempty := s.AnyHasTagPart("omitempty")
+	var fieldNVar string
+	if omitempty {
+
+		fieldNVar = oeIdentPrefix + "Len"
+
+		e.p.printf("\n// omitempty: check for empty values")
+		e.p.printf("\n%s := uint32(%d)", fieldNVar, nfields)
+		e.p.printf("\n%s", bm.typeDecl())
+		for i, sf := range s.Fields {
+			if !e.p.ok() {
+				return
+			}
+			if ize := sf.FieldElem.IfZeroExpr(); ize != "" && sf.HasTagPart("omitempty") {
+				e.p.printf("\nif %s {", ize)
+				e.p.printf("\n%s--", fieldNVar)
+				e.p.printf("\n%s", bm.setStmt(i))
+				e.p.printf("\n}")
+			}
+		}
+
+		e.p.printf("\n// variable map header, size %s", fieldNVar)
+		e.p.varWriteMapHeader("en", fieldNVar, nfields)
+		e.p.print("\nif err != nil { return }")
+		if !e.p.ok() {
+			return
+		}
+
+		// quick return for the case where the entire thing is empty, but only at the top level
+		if !strings.Contains(s.Varname(), ".") {
+			e.p.printf("\nif %s == 0 { return }", fieldNVar)
+		}
+
+	} else {
+
+		// non-omitempty version
+		data = msgp.AppendMapHeader(nil, uint32(nfields))
+		e.p.printf("\n// map header, size %d", nfields)
+		e.Fuse(data)
+		if len(s.Fields) == 0 {
+			e.fuseHook()
+		}
+
+	}
+
 	for i := range s.Fields {
 		if !e.p.ok() {
 			return
 		}
+
+		// if field is omitempty, wrap with if statement based on the emptymask
+		oeField := s.Fields[i].HasTagPart("omitempty") && s.Fields[i].FieldElem.IfZeroExpr() != ""
+		if oeField {
+			e.p.printf("\nif %s == 0 { // if not empty", bm.readExpr(i))
+		}
+
 		data = msgp.AppendString(nil, s.Fields[i].FieldTag)
 		e.p.printf("\n// write %q", s.Fields[i].FieldTag)
 		e.Fuse(data)
+		e.fuseHook()
+
+		e.ctx.PushString(s.Fields[i].FieldName)
 		next(e, s.Fields[i].FieldElem)
+		e.ctx.Pop()
+
+		if oeField {
+			e.p.print("\n}") // close if statement
+		}
+
 	}
 }
 
@@ -133,7 +203,9 @@ func (e *encodeGen) gMap(m *Map) {
 
 	e.p.printf("\nfor %s, %s := range %s {", m.Keyidx, m.Validx, vname)
 	e.writeAndCheck(stringTyp, literalFmt, m.Keyidx)
+	e.ctx.PushVar(m.Keyidx)
 	next(e, m.Value)
+	e.ctx.Pop()
 	e.p.closeblock()
 }
 
@@ -153,7 +225,7 @@ func (e *encodeGen) gSlice(s *Slice) {
 	}
 	e.fuseHook()
 	e.writeAndCheck(arrayHeader, lenAsUint32, s.Varname())
-	e.p.rangeBlock(s.Index, s.Varname(), e, s.Els)
+	e.p.rangeBlock(e.ctx, s.Index, s.Varname(), e, s.Els)
 }
 
 func (e *encodeGen) gArray(a *Array) {
@@ -164,12 +236,12 @@ func (e *encodeGen) gArray(a *Array) {
 	// shortcut for [const]byte
 	if be, ok := a.Els.(*BaseElem); ok && (be.Value == Byte || be.Value == Uint8) {
 		e.p.printf("\nerr = en.WriteBytes((%s)[:])", a.Varname())
-		e.p.print(errcheck)
+		e.p.wrapErrCheck(e.ctx.ArgsStr())
 		return
 	}
 
 	e.writeAndCheck(arrayHeader, literalFmt, coerceArraySize(a.Size))
-	e.p.rangeBlock(a.Index, a.Varname(), e, a.Els)
+	e.p.rangeBlock(e.ctx, a.Index, a.Varname(), e, a.Els)
 }
 
 func (e *encodeGen) gBase(b *BaseElem) {
@@ -185,13 +257,13 @@ func (e *encodeGen) gBase(b *BaseElem) {
 			vname = randIdent()
 			e.p.printf("\nvar %s %s", vname, b.BaseType())
 			e.p.printf("\n%s, err = %s", vname, tobaseConvert(b))
-			e.p.printf(errcheck)
+			e.p.wrapErrCheck(e.ctx.ArgsStr())
 		}
 	}
 
 	if b.Value == IDENT { // unknown identity
 		e.p.printf("\nerr = %s.EncodeMsg(en)", vname)
-		e.p.print(errcheck)
+		e.p.wrapErrCheck(e.ctx.ArgsStr())
 	} else { // typical case
 		e.writeAndCheck(b.BaseName(), literalFmt, vname)
 	}
