@@ -10,7 +10,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/tinylib/msgp/gen"
+	"github.com/GannettDigital/msgp/gen"
 )
 
 // A FileSet is the in-memory representation of a
