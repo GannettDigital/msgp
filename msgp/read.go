@@ -3,7 +3,6 @@ package msgp
 import (
 	"io"
 	"math"
-	"strconv"
 	"sync"
 	"time"
 
@@ -517,17 +516,6 @@ func (m *Reader) ReadFloat64() (f float64, err error) {
 		if p[0] == mfloat32 {
 			ef, err := m.ReadFloat32()
 			return float64(ef), err
-		} else if isfixstr(p[0]) || p[0] == mstr8 || p[0] == mstr16 || p[0] == mstr32 {
-			var sf string
-			sf, err = m.ReadString()
-			if err != nil {
-				return
-			} else if len(sf) == 0 {
-				f = 0
-			} else {
-				f, err = strconv.ParseFloat(sf, 64)
-			}
-			return
 		}
 		err = badPrefix(Float64Type, p[0])
 		return
@@ -595,17 +583,6 @@ func (m *Reader) ReadInt64() (i int64, err error) {
 	} else if isnfixint(lead) {
 		i = int64(rnfixint(lead))
 		_, err = m.R.Skip(1)
-		return
-	} else if isfixstr(p[0]) || p[0] == mstr8 || p[0] == mstr16 || p[0] == mstr32 {
-		var si string
-		si, err = m.ReadString()
-		if err != nil {
-			return
-		} else if len(si) == 0 {
-			i = 0
-		} else {
-			i, err = strconv.ParseInt(si, 10, 64)
-		}
 		return
 	}
 
@@ -1268,7 +1245,7 @@ func (m *Reader) ReadMapStrIntf(mp map[string]interface{}) (err error) {
 }
 
 // ReadTime reads a time.Time object from the reader.
-// The returned time's location will be set to UTC.
+// The returned time's location will be set to time.Local.
 func (m *Reader) ReadTime() (t time.Time, err error) {
 	var p []byte
 	p, err = m.R.Peek(15)
@@ -1284,7 +1261,7 @@ func (m *Reader) ReadTime() (t time.Time, err error) {
 		return
 	}
 	sec, nsec := getUnix(p[3:])
-	t = time.Unix(sec, int64(nsec)).UTC()
+	t = time.Unix(sec, int64(nsec)).Local()
 	_, err = m.R.Skip(15)
 	return
 }

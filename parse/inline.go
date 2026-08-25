@@ -3,7 +3,7 @@ package parse
 import (
 	"sort"
 
-	"github.com/GannettDigital/msgp/gen"
+	"github.com/tinylib/msgp/gen"
 )
 
 // This file defines when and how we
@@ -95,7 +95,7 @@ func (f *FileSet) propInline() {
 	// make sure we process inlining determinstically:
 	// start with the least-complex elems;
 	// use identifier names as a tie-breaker
-	sort.SliceStable(all, func(i, j int) bool {
+	sort.Slice(all, func(i, j int) bool {
 		ig, jg := &all[i], &all[j]
 		ic, jc := ig.el.Complexity(), jg.el.Complexity()
 		return ic < jc || (ic == jc && ig.name < jg.name)
@@ -123,7 +123,7 @@ func (f *FileSet) propInline() {
 }
 
 const fatalloop = `detected infinite recursion in inlining loop!
-Please file a bug at github.com/GannettDigital/msgp/issues!
+Please file a bug at github.com/tinylib/msgp/issues!
 Thanks!
 `
 

@@ -6,7 +6,7 @@ import (
 	"go/parser"
 	"strings"
 
-	"github.com/GannettDigital/msgp/gen"
+	"github.com/tinylib/msgp/gen"
 )
 
 const linePrefix = "//msgp:"
