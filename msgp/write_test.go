@@ -20,8 +20,9 @@ var (
 
 func RandBytes(sz int) []byte {
 	out := make([]byte, sz)
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	for i := range out {
-		out[i] = byte(rand.Int63n(math.MaxInt64) % 256)
+		out[i] = byte(rng.Uint32())
 	}
 	return out
 }
@@ -70,7 +71,7 @@ func BenchmarkWriteMapHeader(b *testing.B) {
 	N := b.N / 4
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < N; i++ {
+	for range N {
 		wr.WriteMapHeader(0)
 		wr.WriteMapHeader(8)
 		wr.WriteMapHeader(tuint16)
@@ -165,7 +166,7 @@ func BenchmarkWriteArrayHeader(b *testing.B) {
 	N := b.N / 4
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < N; i++ {
+	for range N {
 		wr.WriteArrayHeader(0)
 		wr.WriteArrayHeader(16)
 		wr.WriteArrayHeader(tuint16)
@@ -196,7 +197,7 @@ func TestWriteFloat64(t *testing.T) {
 	var buf bytes.Buffer
 	wr := NewWriter(&buf)
 
-	for i := 0; i < 10000; i++ {
+	for range 10000 {
 		buf.Reset()
 		flt := (rand.Float64() - 0.5) * math.MaxFloat64
 		err := wr.WriteFloat64(flt)
@@ -220,7 +221,7 @@ func TestReadWriterDuration(t *testing.T) {
 	var buf bytes.Buffer
 	wr := NewWriter(&buf)
 
-	for i := 0; i < 10000; i++ {
+	for range 10000 {
 		buf.Reset()
 		dur := time.Duration(rand.Int63())
 		err := wr.WriteDuration(dur)
@@ -264,7 +265,7 @@ func TestWriteFloat32(t *testing.T) {
 	var buf bytes.Buffer
 	wr := NewWriter(&buf)
 
-	for i := 0; i < 10000; i++ {
+	for range 10000 {
 		buf.Reset()
 		flt := (rand.Float32() - 0.5) * math.MaxFloat32
 		err := wr.WriteFloat32(flt)
@@ -299,7 +300,7 @@ func TestWriteInt64(t *testing.T) {
 	var buf bytes.Buffer
 	wr := NewWriter(&buf)
 
-	for i := 0; i < 10000; i++ {
+	for range 10000 {
 		buf.Reset()
 
 		num := (rand.Int63n(math.MaxInt64)) - (math.MaxInt64 / 2)
@@ -325,7 +326,7 @@ func BenchmarkWriteInt64(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		wr.WriteInt64(int64(tint64))
+		wr.WriteInt64(tint64)
 	}
 }
 
@@ -333,7 +334,7 @@ func TestWriteUint64(t *testing.T) {
 	var buf bytes.Buffer
 	wr := NewWriter(&buf)
 
-	for i := 0; i < 10000; i++ {
+	for range 10000 {
 		buf.Reset()
 
 		num := uint64(rand.Int63n(math.MaxInt64))
@@ -358,7 +359,7 @@ func BenchmarkWriteUint64(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		wr.WriteUint64(uint64(tuint64))
+		wr.WriteUint64(tuint64)
 	}
 }
 

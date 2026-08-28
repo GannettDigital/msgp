@@ -29,9 +29,11 @@ type OmitEmpty0 struct {
 
 	APtrNamedStr *NamedString `msg:"aptrnamedstr,omitempty"`
 
-	AString      string `msg:"astring,omitempty"`
-	ANamedString string `msg:"anamedstring,omitempty"`
-	AByteSlice   []byte `msg:"abyteslice,omitempty"`
+	AString         string            `msg:"astring,omitempty"`
+	ANamedString    string            `msg:"anamedstring,omitempty"`
+	AByteSlice      []byte            `msg:"abyteslice,omitempty"`
+	ASliceByteSlice [][]byte          `msg:"aslicebyteslice,omitempty"`
+	AMapByteSlice   map[string][]byte `msg:"amapbyteslice,omitempty"`
 
 	ASliceString      []string      `msg:"aslicestring,omitempty"`
 	ASliceNamedString []NamedString `msg:"aslicenamedstring,omitempty"`
@@ -51,6 +53,13 @@ type OmitEmpty0 struct {
 
 	ATime time.Time `msg:"atime,omitempty"`
 }
+
+type TypeSample struct {
+	K uint32 `msg:"k,omitempty"`
+	V uint32 `msg:"v,omitempty"`
+}
+
+type TypeSamples []TypeSample
 
 type (
 	NamedBool    bool

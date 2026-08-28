@@ -3,6 +3,7 @@ package gen
 import (
 	"fmt"
 	"io"
+	"math"
 	"strings"
 
 	"github.com/GannettDigital/msgp/msgp"
@@ -27,9 +28,36 @@ func (e *encodeGen) Apply(dirs []string) error {
 	return nil
 }
 
-func (e *encodeGen) writeAndCheck(typ string, argfmt string, arg interface{}) {
+func (e *encodeGen) writeAndCheck(typ string, argfmt string, arg any) {
+	if e.ctx.compFloats && typ == "Float64" {
+		typ = "Float"
+	}
+	if e.ctx.newTime && typ == "Time" {
+		typ = "TimeExt"
+	}
+
 	e.p.printf("\nerr = en.Write%s(%s)", typ, fmt.Sprintf(argfmt, arg))
 	e.p.wrapErrCheck(e.ctx.ArgsStr())
+}
+
+func (e *encodeGen) writeAndCheckWithArrayLimit(typ string, argfmt string, arg any) {
+	e.writeAndCheck(typ, argfmt, arg)
+	if e.ctx.marshalLimits && e.ctx.arrayLimit != math.MaxUint32 {
+		e.p.printf("\nif %s > %slimitArrays {", fmt.Sprintf(argfmt, arg), e.ctx.limitPrefix)
+		e.p.printf("\nerr = msgp.ErrLimitExceeded")
+		e.p.printf("\nreturn")
+		e.p.printf("\n}")
+	}
+}
+
+func (e *encodeGen) writeAndCheckWithMapLimit(typ string, argfmt string, arg any) {
+	e.writeAndCheck(typ, argfmt, arg)
+	if e.ctx.marshalLimits && e.ctx.mapLimit != math.MaxUint32 {
+		e.p.printf("\nif %s > %slimitMaps {", fmt.Sprintf(argfmt, arg), e.ctx.limitPrefix)
+		e.p.printf("\nerr = msgp.ErrLimitExceeded")
+		e.p.printf("\nreturn")
+		e.p.printf("\n}")
+	}
 }
 
 func (e *encodeGen) fuseHook() {
@@ -47,7 +75,25 @@ func (e *encodeGen) Fuse(b []byte) {
 	}
 }
 
-func (e *encodeGen) Execute(p Elem) error {
+// binaryEncodeCall generates code for marshaler interfaces
+func (e *encodeGen) binaryEncodeCall(vname, method, writeType, arg string) {
+	bts := randIdent()
+	e.p.printf("\nvar %s []byte", bts)
+	if arg == "" {
+		e.p.printf("\n%s, err = %s.%s()", bts, vname, method)
+	} else {
+		e.p.printf("\n%s, err = %s.%s(%s)", bts, vname, method, arg)
+	}
+	e.p.wrapErrCheck(e.ctx.ArgsStr())
+	if writeType == "String" {
+		e.writeAndCheck(writeType, literalFmt, "string("+bts+")")
+	} else {
+		e.writeAndCheck(writeType, literalFmt, bts)
+	}
+}
+
+func (e *encodeGen) Execute(p Elem, ctx Context) error {
+	e.ctx = &ctx
 	if !e.p.ok() {
 		return e.p.err
 	}
@@ -59,12 +105,17 @@ func (e *encodeGen) Execute(p Elem) error {
 		return nil
 	}
 
-	e.ctx = &Context{}
-
 	e.p.comment("EncodeMsg implements msgp.Encodable")
-
-	e.p.printf("\nfunc (%s %s) EncodeMsg(en *msgp.Writer) (err error) {", p.Varname(), imutMethodReceiver(p))
+	rcv := imutMethodReceiver(p)
+	ogVar := p.Varname()
+	if p.AlwaysPtr(nil) {
+		rcv = methodReceiver(p)
+	}
+	e.p.printf("\nfunc (%s %s) EncodeMsg(en *msgp.Writer) (err error) {", ogVar, rcv)
 	next(e, p)
+	if p.AlwaysPtr(nil) {
+		p.SetVarname(ogVar)
+	}
 	e.p.nakedReturn()
 	return e.p.err
 }
@@ -85,9 +136,7 @@ func (e *encodeGen) tuple(s *Struct) {
 	data := msgp.AppendArrayHeader(nil, uint32(nfields))
 	e.p.printf("\n// array header, size %d", nfields)
 	e.Fuse(data)
-	if len(s.Fields) == 0 {
-		e.fuseHook()
-	}
+	e.fuseHook()
 	for i := range s.Fields {
 		if !e.p.ok() {
 			return
@@ -101,6 +150,7 @@ func (e *encodeGen) tuple(s *Struct) {
 		}
 		SetIsAllowNil(fieldElem, anField)
 		e.ctx.PushString(s.Fields[i].FieldName)
+		setTypeParams(s.Fields[i].FieldElem, s.typeParams)
 		next(e, s.Fields[i].FieldElem)
 		e.ctx.Pop()
 		if anField {
@@ -132,6 +182,7 @@ func (e *encodeGen) structmap(s *Struct) {
 
 	omitempty := s.AnyHasTagPart("omitempty")
 	omitzero := s.AnyHasTagPart("omitzero")
+	var closeZero bool
 	var fieldNVar string
 	if omitempty || omitzero {
 
@@ -165,9 +216,11 @@ func (e *encodeGen) structmap(s *Struct) {
 			return
 		}
 
-		// quick return for the case where the entire thing is empty, but only at the top level
-		if !strings.Contains(s.Varname(), ".") {
-			e.p.printf("\nif %s == 0 { return }", fieldNVar)
+		// Skip block, if no fields are set.
+		if nfields > 1 {
+			e.p.printf("\n\n// skip if no fields are to be emitted")
+			e.p.printf("\nif %s != 0 {", fieldNVar)
+			closeZero = true
 		}
 
 	} else {
@@ -210,13 +263,16 @@ func (e *encodeGen) structmap(s *Struct) {
 		SetIsAllowNil(fieldElem, anField)
 
 		e.ctx.PushString(s.Fields[i].FieldName)
+		setTypeParams(s.Fields[i].FieldElem, s.typeParams)
 		next(e, s.Fields[i].FieldElem)
 		e.ctx.Pop()
 
 		if oeField || anField {
 			e.p.print("\n}") // close if statement
 		}
-
+	}
+	if closeZero {
+		e.p.printf("\n}") // close if statement
 	}
 }
 
@@ -226,11 +282,34 @@ func (e *encodeGen) gMap(m *Map) {
 	}
 	e.fuseHook()
 	vname := m.Varname()
-	e.writeAndCheck(mapHeader, lenAsUint32, vname)
+	e.writeAndCheckWithMapLimit(mapHeader, lenAsUint32, vname)
 
 	e.p.printf("\nfor %s, %s := range %s {", m.Keyidx, m.Validx, vname)
-	e.writeAndCheck(stringTyp, literalFmt, m.Keyidx)
+	if m.Key != nil {
+		if m.AllowBinMaps {
+			e.ctx.PushVar(m.Keyidx)
+			m.Key.SetVarname(m.Keyidx)
+			next(e, m.Key)
+			e.ctx.Pop()
+		} else {
+			keyIdx := m.Keyidx
+			if key, ok := m.Key.(*BaseElem); ok {
+				if m.AutoMapShims && CanAutoShim[key.Value] {
+					keyIdx = fmt.Sprintf("msgp.AutoShim{}.%sString(%s(%s))", key.Value.String(), strings.ToLower(key.Value.String()), keyIdx)
+				} else if key.Value == String {
+					keyIdx = fmt.Sprintf("%s(%s)", key.ToBase(), keyIdx)
+				} else if key.alias != "" {
+					keyIdx = fmt.Sprintf("string(%s)", keyIdx)
+				}
+			}
+			e.writeAndCheck(stringTyp, literalFmt, keyIdx)
+		}
+	} else {
+		e.writeAndCheck(stringTyp, literalFmt, m.Keyidx)
+	}
 	e.ctx.PushVar(m.Keyidx)
+	m.Value.SetIsAllowNil(false)
+	setTypeParams(m.Value, m.typeParams)
 	next(e, m.Value)
 	e.ctx.Pop()
 	e.p.closeblock()
@@ -242,6 +321,11 @@ func (e *encodeGen) gPtr(s *Ptr) {
 	}
 	e.fuseHook()
 	e.p.printf("\nif %s == nil { err = en.WriteNil(); if err != nil { return; } } else {", s.Varname())
+	if s.typeParams.TypeParams != "" {
+		tp := s.typeParams
+		tp.isPtr = true
+		s.Value.SetTypeParams(tp)
+	}
 	next(e, s.Value)
 	e.p.closeblock()
 }
@@ -251,7 +335,8 @@ func (e *encodeGen) gSlice(s *Slice) {
 		return
 	}
 	e.fuseHook()
-	e.writeAndCheck(arrayHeader, lenAsUint32, s.Varname())
+	e.writeAndCheckWithArrayLimit(arrayHeader, lenAsUint32, s.Varname())
+	setTypeParams(s.Els, s.typeParams)
 	e.p.rangeBlock(e.ctx, s.Index, s.Varname(), e, s.Els)
 }
 
@@ -268,6 +353,7 @@ func (e *encodeGen) gArray(a *Array) {
 	}
 
 	e.writeAndCheck(arrayHeader, literalFmt, coerceArraySize(a.Size))
+	setTypeParams(a.Els, a.typeParams)
 	e.p.rangeBlock(e.ctx, a.Index, a.Varname(), e, a.Els)
 }
 
@@ -287,11 +373,44 @@ func (e *encodeGen) gBase(b *BaseElem) {
 			e.p.wrapErrCheck(e.ctx.ArgsStr())
 		}
 	}
+	switch b.Value {
+	case AInt64, AInt32, AUint64, AUint32, ABool:
+		t := strings.TrimPrefix(b.BaseName(), "atomic.")
+		e.writeAndCheck(t, literalFmt, strings.TrimPrefix(vname, "*")+".Load()")
+	case BinaryMarshaler:
+		e.binaryEncodeCall(vname, "MarshalBinary", "Bytes", "")
+	case TextMarshalerBin:
+		e.binaryEncodeCall(vname, "MarshalText", "Bytes", "")
+	case TextMarshalerString:
+		e.binaryEncodeCall(vname, "MarshalText", "String", "")
+	case BinaryAppender:
+		// We do not know if the interface is implemented on pointer or value.
+		vname = strings.Trim(vname, "*()")
+		e.writeAndCheck("BinaryAppender", literalFmt, vname)
+	case TextAppenderBin:
+		vname = strings.Trim(vname, "*()")
+		e.writeAndCheck("TextAppender", literalFmt, vname)
+	case TextAppenderString:
+		vname = strings.Trim(vname, "*()")
+		e.writeAndCheck("TextAppenderString", literalFmt, vname)
+	case IDENT: // unknown identity
+		dst := b.BaseType()
+		if b.typeParams.isPtr {
+			dst = "*" + dst
+		}
 
-	if b.Value == IDENT { // unknown identity
+		// Strip type parameters from dst for lookup in ToPointerMap
+		lookupKey := stripTypeParams(dst)
+		if idx := strings.Index(dst, "["); idx != -1 {
+			lookupKey = dst[:idx]
+		}
+
+		if remap := b.typeParams.ToPointerMap[lookupKey]; remap != "" {
+			vname = fmt.Sprintf(remap, vname)
+		}
 		e.p.printf("\nerr = %s.EncodeMsg(en)", vname)
 		e.p.wrapErrCheck(e.ctx.ArgsStr())
-	} else { // typical case
+	default:
 		e.writeAndCheck(b.BaseName(), literalFmt, vname)
 	}
 }

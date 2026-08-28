@@ -1,6 +1,7 @@
 package _generated
 
 import (
+	"encoding/json"
 	"os"
 	"time"
 
@@ -19,18 +20,9 @@ import (
 // a struct definition is
 // by adding it to this file.
 
-type Block [32]byte
+//msgp:timezone utc
 
-// tests edge-cases with
-// compiling size compilation.
-type X struct {
-	Values    [32]byte    // should compile to 32*msgp.ByteSize; encoded as Bin
-	ValuesPtr *[32]byte   // check (*)[:] deref
-	More      Block       // should be identical to the above
-	Others    [][32]int32 // should compile to len(x.Others)*32*msgp.Int32Size
-	Matrix    [][]int32   // should not optimize
-	ManyFixed []Fixed
-}
+type Block [32]byte
 
 // test fixed-size struct
 // size compilation
@@ -39,10 +31,41 @@ type Fixed struct {
 	B bool
 }
 
+type StandaloneBytes []byte
+
+type AliasedType = Fixed
+type AliasedType2 = *Fixed
+type AliasedType3 = uint64
+type AliasedType4 = *uint64
+
+// tests edge-cases with
+// compiling size compilation.
+type X struct {
+	Values         [32]byte    // should compile to 32*msgp.ByteSize; encoded as Bin
+	ValuesPtr      *[32]byte   // check (*)[:] deref
+	More           Block       // should be identical to the above
+	Others         [][32]int32 // should compile to len(x.Others)*32*msgp.Int32Size
+	Matrix         [][]int32   // should not optimize
+	ManyFixed      []Fixed
+	WeirdTag       string                       `msg:"\x0b"`
+	ZCBytes        []byte                       `msg:",zerocopy"`
+	ZCBytesAN      []byte                       `msg:",zerocopy,allownil"`
+	ZCBytesOE      []byte                       `msg:",zerocopy,omitempty"`
+	ZCBytesSlice   [][]byte                     `msg:",zerocopy"`
+	ZCBytesArr     [2][]byte                    `msg:",zerocopy"`
+	ZCBytesMap     map[string][]byte            `msg:",zerocopy"`
+	ZCBytesMapDeep map[string]map[string][]byte `msg:",zerocopy"`
+	CustomBytes    CustomBytes                  `msg:",zerocopy"`
+	Renamed1       AliasedType
+	Renamed2       AliasedType2
+	Renamed3       AliasedType3
+	Renamed4       AliasedType4
+}
+
 type TestType struct {
 	F   *float64          `msg:"float"`
 	Els map[string]string `msg:"elements"`
-	Obj struct {          // test anonymous struct
+	Obj struct { // test anonymous struct
 		ValueA string `msg:"value_a"`
 		ValueB []byte `msg:"value_b"`
 	} `msg:"object"`
@@ -71,6 +94,14 @@ type Object struct {
 	MapMap          map[string]map[string]string
 	MapStringEmpty  map[string]struct{}
 	MapStringEmpty2 map[string]EmptyStruct
+	ZCBytes         []byte                       `msg:",zerocopy"`
+	ZCBytesAN       []byte                       `msg:",zerocopy,allownil"`
+	ZCBytesOE       []byte                       `msg:",zerocopy,omitempty"`
+	ZCBytesSlice    [][]byte                     `msg:",zerocopy"`
+	ZCBytesArr      [2][]byte                    `msg:",zerocopy"`
+	ZCBytesMap      map[string][]byte            `msg:",zerocopy"`
+	ZCBytesMapDeep  map[string]map[string][]byte `msg:",zerocopy"`
+	CustomBytes     CustomBytes                  `msg:",zerocopy"`
 }
 
 //msgp:tuple TestBench
@@ -259,7 +290,7 @@ type ArrayConstants struct {
 }
 
 // Ensure non-msg struct tags work:
-// https://github.com/GannettDigital/msgp/issues/201
+// https://github.com/tinylib/msgp/issues/201
 
 type NonMsgStructTags struct {
 	A      []string `json:"fooJSON" msg:"fooMsgp"`
@@ -278,3 +309,70 @@ type NonMsgStructTags struct {
 }
 
 type EmptyStruct struct{}
+
+type StructByteSlice struct {
+	ABytes      []byte       `msg:",allownil"`
+	AString     []string     `msg:",allownil"`
+	ABool       []bool       `msg:",allownil"`
+	AInt        []int        `msg:",allownil"`
+	AInt8       []int8       `msg:",allownil"`
+	AInt16      []int16      `msg:",allownil"`
+	AInt32      []int32      `msg:",allownil"`
+	AInt64      []int64      `msg:",allownil"`
+	AUint       []uint       `msg:",allownil"`
+	AUint8      []uint8      `msg:",allownil"`
+	AUint16     []uint16     `msg:",allownil"`
+	AUint32     []uint32     `msg:",allownil"`
+	AUint64     []uint64     `msg:",allownil"`
+	AFloat32    []float32    `msg:",allownil"`
+	AFloat64    []float64    `msg:",allownil"`
+	AComplex64  []complex64  `msg:",allownil"`
+	AComplex128 []complex128 `msg:",allownil"`
+	AStruct     []Fixed      `msg:",allownil"`
+}
+
+type NumberJSONSample struct {
+	Single json.Number
+	Array  []json.Number
+	Map    map[string]json.Number
+	OE     json.Number `msg:",omitempty"`
+}
+
+type Flobbity struct {
+	A Flobs `msg:"a,omitempty"`
+	B Flobs `msg:"b,omitempty"`
+}
+
+type Flobs []Flob
+
+type Flob struct {
+	X Numberwang `msg:"x"`
+	Y int8       `msg:"y"`
+	Z int8       `msg:"z"`
+	W int32      `msg:"w"`
+}
+
+type Numberwang int8
+
+//msgp:ignore ExternalString
+type ExternalString string
+type ExternalArr [4]byte
+type ExternalInt int
+
+//msgp:ignore regex:IGNORE
+
+type RegexIGNORETest struct{}
+
+// Will fail to compile if also generated
+func (z *RegexIGNORETest) Msgsize() int {
+	return 0
+}
+
+//msgp:size ignore regex:IGNSIZE
+
+type RegexIGNSIZETest struct{}
+
+// Will fail to compile if also generated
+func (z *RegexIGNSIZETest) Msgsize() int {
+	return 0
+}

@@ -2,6 +2,7 @@ package gen
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -88,10 +89,28 @@ const (
 	Int32
 	Int64
 	Bool
-	Intf     // interface{}
-	Time     // time.Time
-	Duration // time.Duration
-	Ext      // extension
+	Intf       // interface{}
+	Time       // time.Time
+	Duration   // time.Duration
+	Ext        // extension
+	JsonNumber // json.Number
+	AInt64
+	AUint64
+	AInt32
+	AUint32
+	ABool
+
+	// Binary marshaler types
+	BinaryMarshaler // encoding.BinaryMarshaler/BinaryUnmarshaler
+	BinaryAppender  // encoding.BinaryAppender/BinaryUnmarshaler
+
+	// Text marshaler types (stored as binary by default)
+	TextMarshalerBin // encoding.TextMarshaler/TextUnmarshaler -> bin
+	TextAppenderBin  // encoding.TextAppender/TextUnmarshaler -> bin
+
+	// Text marshaler types (stored as string)
+	TextMarshalerString // encoding.TextMarshaler/TextUnmarshaler -> string
+	TextAppenderString  // encoding.TextAppender/TextUnmarshaler -> string
 
 	IDENT // IDENT means an unrecognized identifier
 )
@@ -123,6 +142,12 @@ var primitives = map[string]Primitive{
 	"time.Time":      Time,
 	"time.Duration":  Duration,
 	"msgp.Extension": Ext,
+	"json.Number":    JsonNumber,
+	"atomic.Int64":   AInt64,
+	"atomic.Uint64":  AUint64,
+	"atomic.Int32":   AInt32,
+	"atomic.Uint32":  AUint32,
+	"atomic.Bool":    ABool,
 }
 
 // types built into the library
@@ -134,13 +159,61 @@ var builtins = map[string]struct{}{
 }
 
 // common data/methods for every Elem
-type common struct{ vname, alias string }
+type common struct {
+	vname, alias string
+	ptrRcv       bool
+	typeParams   GenericTypeParams // Generic type parameters, e.g., "[T]"
+}
+
+// GenericTypeParams is a struct that contains the generic type parameters for an element.
+type GenericTypeParams struct {
+	TypeParams   string
+	ToPointerMap map[string]string
+	isPtr        bool
+}
 
 func (c *common) SetVarname(s string) { c.vname = s }
 func (c *common) Varname() string     { return c.vname }
-func (c *common) Alias(typ string)    { c.alias = typ }
-func (c *common) hidden()             {}
-func (c *common) AllowNil() bool      { return false }
+
+// typeNameWithParams returns the type name with generic parameters appended if they exist
+// stripTypeParams removes type parameters from a type name for lookup purposes
+// e.g. "MyType[T, U]" becomes "MyType", "*SomeType[A]" becomes "*SomeType"
+func stripTypeParams(typeName string) string {
+	if idx := strings.Index(typeName, "["); idx != -1 {
+		return typeName[:idx]
+	}
+	return typeName
+}
+
+func (c *common) typeNameWithParams(baseName string) string {
+	if c.typeParams.TypeParams != "" && !strings.Contains(baseName, "[") {
+		// Check if baseName is a single identifier without dots (likely a type parameter)
+		if !strings.Contains(baseName, ".") && len(baseName) <= 2 && len(baseName) > 0 {
+			// This looks like a simple type parameter, don't add type parameters
+			return baseName
+		}
+		return baseName + c.typeParams.TypeParams
+	}
+	return baseName
+}
+
+// baseTypeName returns the type name without generic parameters (for use in method receivers)
+func (c *common) baseTypeName() string {
+	return c.alias
+}
+func (c *common) Alias(typ string)                   { c.alias = typ }
+func (c *common) hidden()                            {}
+func (c *common) AllowNil() bool                     { return false }
+func (c *common) SetIsAllowNil(bool)                 {}
+func (c *common) SetTypeParams(tp GenericTypeParams) { c.typeParams = tp }
+func (c *common) TypeParams() GenericTypeParams      { return c.typeParams }
+func (c *common) BaseTypeName() string               { return c.baseTypeName() }
+func (c *common) AlwaysPtr(set *bool) bool {
+	if c != nil && set != nil {
+		c.ptrRcv = *set
+	}
+	return c.ptrRcv
+}
 
 func IsPrintable(e Elem) bool {
 	if be, ok := e.(*BaseElem); ok && !be.Printable() {
@@ -191,6 +264,12 @@ type Elem interface {
 	// This is true for slices and maps.
 	AllowNil() bool
 
+	// SetIsAllowNil will set the allownil value, if the type supports it.
+	SetIsAllowNil(bool)
+
+	// AlwaysPtr will return true if receiver should always be a pointer.
+	AlwaysPtr(set *bool) bool
+
 	// IfZeroExpr returns the expression to compare to an empty value
 	// for this type, per the rules of the `omitempty` feature.
 	// It is meant to be used in an if statement
@@ -199,6 +278,15 @@ type Elem interface {
 	// Returns "" if zero/empty not supported for this Elem.
 	// Note that this is NOT used by the `omitzero` feature.
 	IfZeroExpr() string
+
+	// SetTypeParams sets the generic type parameters for this element
+	SetTypeParams(tp GenericTypeParams)
+
+	// TypeParams returns the generic type parameters for this element
+	TypeParams() GenericTypeParams
+
+	// BaseTypeName returns the type name without generic parameters
+	BaseTypeName() string
 
 	hidden()
 }
@@ -237,11 +325,11 @@ ridx:
 }
 
 func (a *Array) TypeName() string {
-	if a.common.alias != "" {
-		return a.common.alias
+	if a.alias != "" {
+		return a.typeNameWithParams(a.alias)
 	}
-	a.common.Alias(fmt.Sprintf("[%s]%s", a.Size, a.Els.TypeName()))
-	return a.common.alias
+	a.Alias(fmt.Sprintf("[%s]%s", a.Size, a.Els.TypeName()))
+	return a.typeNameWithParams(a.alias)
 }
 
 func (a *Array) Copy() Elem {
@@ -250,7 +338,10 @@ func (a *Array) Copy() Elem {
 	return &b
 }
 
-func (a *Array) Complexity() int { return 1 + a.Els.Complexity() }
+func (a *Array) Complexity() int {
+	// We consider the complexity constant and leave the children to decide on their own.
+	return 2
+}
 
 // ZeroExpr returns the zero/empty expression or empty string if not supported.  Unsupported for this case.
 func (a *Array) ZeroExpr() string { return "" }
@@ -261,10 +352,14 @@ func (a *Array) IfZeroExpr() string { return "" }
 // Map is a map[string]Elem
 type Map struct {
 	common
-	Keyidx     string // key variable name
-	Validx     string // value variable name
-	Value      Elem   // value element
-	isAllowNil bool
+	Keyidx        string // key variable name
+	Validx        string // value variable name
+	Key           Elem   // key element (if not string)
+	Value         Elem   // value element
+	AllowMapShims bool   // Allow map keys to be shimmed (default true)
+	AllowBinMaps  bool   // Allow maps with binary keys to be used (default false)
+	AutoMapShims  bool   // Automatically shim map keys of builtin types(default false)
+	isAllowNil    bool
 }
 
 func (m *Map) SetVarname(s string) {
@@ -282,11 +377,15 @@ ridx:
 }
 
 func (m *Map) TypeName() string {
-	if m.common.alias != "" {
-		return m.common.alias
+	if m.alias != "" {
+		return m.typeNameWithParams(m.alias)
 	}
-	m.common.Alias("map[string]" + m.Value.TypeName())
-	return m.common.alias
+	keyType := "string"
+	if m.Key != nil {
+		keyType = m.Key.TypeName()
+	}
+	m.Alias("map[" + keyType + "]" + m.Value.TypeName())
+	return m.typeNameWithParams(m.alias)
 }
 
 func (m *Map) Copy() Elem {
@@ -295,7 +394,25 @@ func (m *Map) Copy() Elem {
 	return &g
 }
 
-func (m *Map) Complexity() int { return 2 + m.Value.Complexity() }
+// readKey will read the key into the variable named by m.Keyidx.
+func (m *Map) readKey(ctx *Context, p printer, t traversal, assignAndCheck func(name string, base string)) {
+	if m.Key != nil && m.AllowBinMaps {
+		p.declare(m.Keyidx, m.Key.TypeName())
+		ctx.PushVar(m.Keyidx)
+		m.Key.SetVarname(m.Keyidx)
+		next(t, m.Key)
+		ctx.Pop()
+		return
+	}
+	// No key, so we assume the key as a string.
+	p.declare(m.Keyidx, "string")
+	assignAndCheck(m.Keyidx, stringTyp)
+}
+
+func (m *Map) Complexity() int {
+	// Complexity of maps are considered constant. Children should decide on their own.
+	return 3
+}
 
 // ZeroExpr returns the zero/empty expression or empty string if not supported.  Always "nil" for this case.
 func (m *Map) ZeroExpr() string { return "nil" }
@@ -328,11 +445,11 @@ func (s *Slice) SetVarname(a string) {
 }
 
 func (s *Slice) TypeName() string {
-	if s.common.alias != "" {
-		return s.common.alias
+	if s.alias != "" {
+		return s.typeNameWithParams(s.alias)
 	}
-	s.common.Alias("[]" + s.Els.TypeName())
-	return s.common.alias
+	s.Alias("[]" + s.Els.TypeName())
+	return s.typeNameWithParams(s.alias)
 }
 
 func (s *Slice) Copy() Elem {
@@ -342,7 +459,8 @@ func (s *Slice) Copy() Elem {
 }
 
 func (s *Slice) Complexity() int {
-	return 1 + s.Els.Complexity()
+	// We leave the inlining decision to the slice children.
+	return 2
 }
 
 // ZeroExpr returns the zero/empty expression or empty string if not supported.  Always "nil" for this case.
@@ -385,7 +503,10 @@ func (s *Ptr) SetVarname(a string) {
 
 	case *BaseElem:
 		// identities have pointer receivers
-		if x.Value == IDENT {
+		// marshaler types also have pointer receivers
+		if x.Value == IDENT || x.Value == BinaryMarshaler || x.Value == BinaryAppender ||
+			x.Value == TextMarshalerBin || x.Value == TextAppenderBin ||
+			x.Value == TextMarshalerString || x.Value == TextAppenderString {
 			// replace directive sets Convert=true and Needsref=true
 			// since BaseElem is behind a pointer we set Needsref=false
 			if x.Convert {
@@ -404,11 +525,11 @@ func (s *Ptr) SetVarname(a string) {
 }
 
 func (s *Ptr) TypeName() string {
-	if s.common.alias != "" {
-		return s.common.alias
+	if s.alias != "" {
+		return s.typeNameWithParams(s.alias)
 	}
-	s.common.Alias("*" + s.Value.TypeName())
-	return s.common.alias
+	s.Alias("*" + s.Value.TypeName())
+	return s.typeNameWithParams(s.alias)
 }
 
 func (s *Ptr) Copy() Elem {
@@ -434,13 +555,14 @@ func (s *Ptr) IfZeroExpr() string { return s.Varname() + " == nil" }
 
 type Struct struct {
 	common
-	Fields  []StructField // field list
-	AsTuple bool          // write as an array instead of a map
+	Fields     []StructField // field list
+	AsTuple    bool          // write as an array instead of a map
+	AsVarTuple bool          // write as an array of variable length instead of a map
 }
 
 func (s *Struct) TypeName() string {
-	if s.common.alias != "" {
-		return s.common.alias
+	if s.alias != "" {
+		return s.alias
 	}
 	str := "struct{\n"
 	for i := range s.Fields {
@@ -449,8 +571,8 @@ func (s *Struct) TypeName() string {
 			" " + s.Fields[i].RawTag + ";\n"
 	}
 	str += "}"
-	s.common.Alias(str)
-	return s.common.alias
+	s.Alias(str)
+	return s.alias
 }
 
 func (s *Struct) SetVarname(a string) {
@@ -502,12 +624,24 @@ func (s *Struct) AnyHasTagPart(pname string) bool {
 	return false
 }
 
+// CountFieldTagPart the count of HasTagPart(p) is true for any field.
+func (s *Struct) CountFieldTagPart(pname string) int {
+	var n int
+	for _, sf := range s.Fields {
+		if sf.HasTagPart(pname) {
+			n++
+		}
+	}
+	return n
+}
+
 type StructField struct {
 	FieldTag      string   // the string inside the `msg:""` tag up to the first comma
 	FieldTagParts []string // the string inside the `msg:""` tag split by commas
 	RawTag        string   // the full struct tag
 	FieldName     string   // the name of the struct field
 	FieldElem     Elem     // the field type
+	FieldLimit    uint32   // field-specific size limit for slices/maps (0 = no limit)
 }
 
 // HasTagPart returns true if the specified tag part (option) is present.
@@ -515,12 +649,22 @@ func (sf *StructField) HasTagPart(pname string) bool {
 	if len(sf.FieldTagParts) < 2 {
 		return false
 	}
-	for _, p := range sf.FieldTagParts[1:] {
-		if p == pname {
-			return true
+	return slices.Contains(sf.FieldTagParts[1:], pname)
+}
+
+// GetTagValue returns the value for a tag part with the format "key=value".
+// Returns the value string and true if found, empty string and false if not found.
+func (sf *StructField) GetTagValue(key string) (string, bool) {
+	if len(sf.FieldTagParts) < 2 {
+		return "", false
+	}
+	prefix := key + "="
+	for _, part := range sf.FieldTagParts[1:] {
+		if strings.HasPrefix(part, prefix) {
+			return strings.TrimPrefix(part, prefix), true
 		}
 	}
-	return false
+	return "", false
 }
 
 type ShimMode int
@@ -538,10 +682,14 @@ type BaseElem struct {
 	ShimMode     ShimMode  // Method used to shim
 	ShimToBase   string    // shim to base type, or empty
 	ShimFromBase string    // shim from base type, or empty
+	ShimErrs     bool      // ShimToBase has errors on function
 	Value        Primitive // Type of element
 	Convert      bool      // should we do an explicit conversion?
+	zerocopy     bool      // Allow zerocopy for byte slices in unmarshal.
 	mustinline   bool      // must inline; not printable
 	needsref     bool      // needs reference for shim
+	parentIsPtr  bool      // parent is a pointer
+	allowNil     *bool     // Override from parent.
 }
 
 func (s *BaseElem) Printable() bool { return !s.mustinline }
@@ -556,7 +704,17 @@ func (s *BaseElem) Alias(typ string) {
 	}
 }
 
-func (s *BaseElem) AllowNil() bool { return s.Value == Bytes }
+func (s *BaseElem) AllowNil() bool {
+	if s.allowNil == nil {
+		return s.Value == Bytes
+	}
+	return *s.allowNil
+}
+
+// SetIsAllowNil will override allownil when tag has been parsed.
+func (s *BaseElem) SetIsAllowNil(b bool) {
+	s.allowNil = &b
+}
 
 func (s *BaseElem) SetVarname(a string) {
 	// extensions whose parents
@@ -577,11 +735,11 @@ func (s *BaseElem) SetVarname(a string) {
 // TypeName returns the syntactically correct Go
 // type name for the base element.
 func (s *BaseElem) TypeName() string {
-	if s.common.alias != "" {
-		return s.common.alias
+	if s.alias != "" {
+		return s.typeNameWithParams(s.alias)
 	}
 	s.common.Alias(s.BaseType())
-	return s.common.alias
+	return s.typeNameWithParams(s.alias)
 }
 
 // ToBase, used if Convert==true, is used as tmp = {{ToBase}}({{Varname}})
@@ -611,13 +769,16 @@ func (s *BaseElem) BaseName() string {
 	if s.Value == Duration {
 		return "Duration"
 	}
+	if s.Value == JsonNumber {
+		return "JSONNumber"
+	}
 	return s.Value.String()
 }
 
 func (s *BaseElem) BaseType() string {
 	switch s.Value {
 	case IDENT:
-		return s.TypeName()
+		return s.alias
 
 	// exceptions to the naming/capitalization
 	// rule:
@@ -629,6 +790,19 @@ func (s *BaseElem) BaseType() string {
 		return "time.Time"
 	case Duration:
 		return "time.Duration"
+	case JsonNumber:
+		return "json.Number"
+	case AInt64:
+		return "atomic.Int64"
+	case AUint64:
+		return "atomic.Uint64"
+	case AInt32:
+		return "atomic.Int32"
+	case AUint32:
+		return "atomic.Uint32"
+	case ABool:
+		return "atomic.Bool"
+
 	case Ext:
 		return "msgp.Extension"
 
@@ -696,10 +870,12 @@ func (s *BaseElem) ZeroExpr() string {
 		return "0"
 	case Bool:
 		return "false"
-
 	case Time:
 		return "(time.Time{})"
-
+	case JsonNumber:
+		return `""`
+	case Intf:
+		return "nil"
 	}
 
 	return ""
@@ -707,6 +883,12 @@ func (s *BaseElem) ZeroExpr() string {
 
 // IfZeroExpr returns the expression to compare to zero/empty.
 func (s *BaseElem) IfZeroExpr() string {
+	switch s.Value {
+	case AInt64, AUint64, AInt32, AUint32:
+		return fmt.Sprintf("%s.Load() == 0", s.Varname())
+	case ABool:
+		return fmt.Sprintf("!%s.Load()", s.Varname())
+	}
 	z := s.ZeroExpr()
 	if z == "" {
 		return ""
@@ -760,6 +942,30 @@ func (k Primitive) String() string {
 		return "time.Duration"
 	case Ext:
 		return "Extension"
+	case JsonNumber:
+		return "json.Number"
+	case AInt64:
+		return "atomic.Int64"
+	case AUint64:
+		return "atomic.Uint64"
+	case AInt32:
+		return "atomic.Int32"
+	case AUint32:
+		return "atomic.Uint32"
+	case ABool:
+		return "atomic.Bool"
+	case BinaryMarshaler:
+		return "BinaryMarshaler"
+	case BinaryAppender:
+		return "BinaryAppender"
+	case TextMarshalerBin:
+		return "TextMarshalerBin"
+	case TextAppenderBin:
+		return "TextAppenderBin"
+	case TextMarshalerString:
+		return "TextMarshalerString"
+	case TextAppenderString:
+		return "TextAppenderString"
 	case IDENT:
 		return "Ident"
 	default:

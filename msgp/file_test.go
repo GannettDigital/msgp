@@ -1,5 +1,4 @@
 //go:build linux || darwin || dragonfly || freebsd || illumos || netbsd || openbsd
-// +build linux darwin dragonfly freebsd illumos netbsd openbsd
 
 package msgp_test
 
@@ -57,7 +56,7 @@ func TestReadWriteFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !bytes.Equal([]byte(out), []byte(data)) {
+	if !bytes.Equal([]byte(out), data) {
 		t.Fatal("Input and output not equal.")
 	}
 }

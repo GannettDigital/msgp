@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math"
+	"regexp"
+	"strings"
 )
 
 const (
@@ -75,7 +78,15 @@ const (
 )
 
 type Printer struct {
-	gens []generator
+	gens          []generator
+	CompactFloats bool
+	ClearOmitted  bool
+	NewTime       bool
+	AsUTC         bool
+	ArrayLimit    uint32
+	MapLimit      uint32
+	MarshalLimits bool
+	LimitPrefix   string
 }
 
 func NewPrinter(m Method, out io.Writer, tests io.Writer) *Printer {
@@ -118,6 +129,19 @@ type TransformPass func(Elem) Elem
 // IgnoreTypename is a pass that just ignores
 // types of a given name.
 func IgnoreTypename(name string) TransformPass {
+	if name, ok := strings.CutPrefix(name, "regex:"); ok {
+		name = strings.TrimPrefix(name, "regex:")
+		rx, err := regexp.Compile(name)
+		if err != nil {
+			panic(fmt.Sprintf("Error compiling ignore regex %q: %v", name, err))
+		}
+		return func(e Elem) Elem {
+			if rx.MatchString(e.TypeName()) {
+				return nil
+			}
+			return e
+		}
+	}
 	return func(e Elem) Elem {
 		if e.TypeName() == name {
 			return nil
@@ -138,13 +162,25 @@ func (p *Printer) ApplyDirective(pass Method, t TransformPass) {
 
 // Print prints an Elem.
 func (p *Printer) Print(e Elem) error {
+	e.SetIsAllowNil(false)
 	for _, g := range p.gens {
 		// Elem.SetVarname() is called before the Print() step in parse.FileSet.PrintTo().
 		// Elem.SetVarname() generates identifiers as it walks the Elem. This can cause
 		// collisions between idents created during SetVarname and idents created during Print,
 		// hence the separate prefixes.
 		resetIdent("zb")
-		err := g.Execute(e)
+		err := g.Execute(e, Context{
+			compFloats:             p.CompactFloats,
+			clearOmitted:           p.ClearOmitted,
+			newTime:                p.NewTime,
+			asUTC:                  p.AsUTC,
+			arrayLimit:             p.ArrayLimit,
+			mapLimit:               p.MapLimit,
+			marshalLimits:          p.MarshalLimits,
+			limitPrefix:            p.LimitPrefix,
+			currentFieldArrayLimit: math.MaxUint32, // Initialize to "no field limit"
+			currentFieldMapLimit:   math.MaxUint32, // Initialize to "no field limit"
+		})
 		resetIdent("za")
 
 		if err != nil {
@@ -171,7 +207,17 @@ func (c contextVar) Arg() string {
 }
 
 type Context struct {
-	path []contextItem
+	path                   []contextItem
+	compFloats             bool
+	clearOmitted           bool
+	newTime                bool
+	asUTC                  bool
+	arrayLimit             uint32
+	mapLimit               uint32
+	marshalLimits          bool
+	limitPrefix            string
+	currentFieldArrayLimit uint32 // Current field's array limit (0 = no field-level limit)
+	currentFieldMapLimit   uint32 // Current field's map limit (0 = no field-level limit)
 }
 
 func (c *Context) PushString(s string) {
@@ -184,6 +230,18 @@ func (c *Context) PushVar(s string) {
 
 func (c *Context) Pop() {
 	c.path = c.path[:len(c.path)-1]
+}
+
+// SetFieldLimits sets the current field-specific limits for the context
+func (c *Context) SetFieldLimits(arrayLimit, mapLimit uint32) {
+	c.currentFieldArrayLimit = arrayLimit
+	c.currentFieldMapLimit = mapLimit
+}
+
+// ClearFieldLimits clears the current field-specific limits (use file limits)
+func (c *Context) ClearFieldLimits() {
+	c.currentFieldArrayLimit = math.MaxUint32
+	c.currentFieldMapLimit = math.MaxUint32
 }
 
 func (c *Context) ArgsStr() string {
@@ -202,7 +260,7 @@ func (c *Context) ArgsStr() string {
 type generator interface {
 	Method() Method
 	Add(p TransformPass)
-	Execute(Elem) error // execute writes the method for the provided object.
+	Execute(Elem, Context) error // execute writes the method for the provided object.
 }
 
 type passes []TransformPass
@@ -253,6 +311,9 @@ func next(t traversal, e Elem) {
 
 // possibly-immutable method receiver
 func imutMethodReceiver(p Elem) string {
+	typeName := p.BaseTypeName()
+	typeParams := p.TypeParams()
+
 	switch e := p.(type) {
 	case *Struct:
 		// TODO(HACK): actually do real math here.
@@ -262,19 +323,19 @@ func imutMethodReceiver(p Elem) string {
 					goto nope
 				}
 			}
-			return p.TypeName()
+			return typeName + typeParams.TypeParams
 		}
 	nope:
-		return "*" + p.TypeName()
+		return "*" + typeName + typeParams.TypeParams
 
 	// gets dereferenced automatically
 	case *Array:
-		return "*" + p.TypeName()
+		return "*" + typeName + typeParams.TypeParams
 
 	// everything else can be
 	// by-value.
 	default:
-		return p.TypeName()
+		return typeName + typeParams.TypeParams
 	}
 }
 
@@ -282,18 +343,21 @@ func imutMethodReceiver(p Elem) string {
 // so that its method receiver
 // is of the write type.
 func methodReceiver(p Elem) string {
+	typeName := p.BaseTypeName()
+	typeParams := p.TypeParams()
+
 	switch p.(type) {
 
 	// structs and arrays are
 	// dereferenced automatically,
 	// so no need to alter varname
 	case *Struct, *Array:
-		return "*" + p.TypeName()
+		return "*" + typeName + typeParams.TypeParams
 	// set variable name to
 	// *varname
 	default:
 		p.SetVarname("(*" + p.Varname() + ")")
-		return "*" + p.TypeName()
+		return "*" + typeName + typeParams.TypeParams
 	}
 }
 
@@ -336,22 +400,64 @@ func (p *printer) resizeMap(size string, m *Map) {
 	p.closeblock()
 }
 
+// CanAutoShim contains the primitives that can be auto-shimmed.
+var CanAutoShim = map[Primitive]bool{Uint: true, Uint8: true, Uint16: true, Uint32: true, Uint64: true, Int: true, Int8: true, Int16: true, Int32: true, Int64: true, Bool: true, Float32: true, Float64: true, Byte: true}
+
 // assign key to value based on varnames
 func (p *printer) mapAssign(m *Map) {
 	if !p.ok() {
 		return
+	}
+
+	if key, ok := m.Key.(*BaseElem); ok {
+		fromBase := key.FromBase()
+		shimErr := key.ShimErrs
+		if m.AutoMapShims && CanAutoShim[key.Value] {
+			fromBase = "msgp.AutoShim{}.Parse" + key.Value.String()
+			shimErr = true
+		}
+		if !m.AllowBinMaps && fromBase != "" {
+			if key.Value == String && key.ShimFromBase != "" {
+				p.printf("\nvar %sTmp %s", m.Keyidx, key.TypeName())
+				if key.ShimErrs {
+					p.printf("\n%sTmp, err = %s(%s)", m.Keyidx, fromBase, m.Keyidx)
+					p.wrapErrCheck("\"shim: " + fromBase + "\"")
+				} else {
+					p.printf("\n%sTmp = %s(%s)", m.Keyidx, fromBase, m.Keyidx)
+				}
+				p.printf("\n%s[%sTmp] = %s", m.Varname(), m.Keyidx, m.Validx)
+				return
+			} else if key.Value == IDENT {
+				p.printf("\n%s[%s(%s)] = %s", m.Varname(), fromBase, m.Keyidx, m.Validx)
+				return
+			} else {
+				if shimErr {
+					p.printf("\nvar %sTmp %s", m.Keyidx, strings.ToLower(key.Value.String()))
+					p.printf("\n%sTmp, err = %s(%s)", m.Keyidx, fromBase, m.Keyidx)
+					p.wrapErrCheck("\"shim: " + m.Varname() + "\"")
+					p.printf("\n%s[%s(%sTmp)] = %s", m.Varname(), key.FromBase(), m.Keyidx, m.Validx)
+				} else {
+					p.printf("\n%s[%s(%s)] = %s", m.Varname(), fromBase, m.Keyidx, m.Validx)
+				}
+				return
+			}
+		}
 	}
 	p.printf("\n%s[%s] = %s", m.Varname(), m.Keyidx, m.Validx)
 }
 
 // clear map keys
 func (p *printer) clearMap(name string) {
-	p.printf("\nfor key := range %[1]s { delete(%[1]s, key) }", name)
+	p.printf("\nclear(%[1]s)", name)
 }
 
 func (p *printer) wrapErrCheck(ctx string) {
 	p.print("\nif err != nil {")
-	p.printf("\nerr = msgp.WrapError(err, %s)", ctx)
+	if ctx != "" {
+		p.printf("\nerr = msgp.WrapError(err, %s)", ctx)
+	} else {
+		p.print("\nerr = msgp.WrapError(err)")
+	}
 	p.printf("\nreturn")
 	p.print("\n}")
 }
@@ -380,6 +486,9 @@ func (p *printer) closeblock() { p.print("\n}") }
 //	}
 func (p *printer) rangeBlock(ctx *Context, idx string, iter string, t traversal, inner Elem) {
 	ctx.PushVar(idx)
+	// Tags on slices do not extend to the elements, so we always disable allownil on elements.
+	// If we want this to happen in the future, it should be a unique tag.
+	inner.SetIsAllowNil(false)
 	p.printf("\n for %s := range %s {", idx, iter)
 	next(t, inner)
 	p.closeblock()
@@ -396,7 +505,7 @@ func (p *printer) comment(s string) {
 	p.print("\n// " + s)
 }
 
-func (p *printer) printf(format string, args ...interface{}) {
+func (p *printer) printf(format string, args ...any) {
 	if p.err == nil {
 		_, p.err = fmt.Fprintf(p.w, format, args...)
 	}
@@ -496,6 +605,27 @@ func (b *bmask) setStmt(bitoffset int) string {
 		fmt.Fprintf(&buf, "[%d]", (bitoffset / 64))
 	}
 	fmt.Fprintf(&buf, " |= 0x%X", (uint64(1) << (uint64(bitoffset) % 64)))
+
+	return buf.String()
+}
+
+// notAllSet returns a check against all fields having been set in set.
+func (b *bmask) notAllSet() string {
+	var buf bytes.Buffer
+	buf.Grow(len(b.varname) + 16)
+	buf.WriteString(b.varname)
+	if b.bitlen > 64 {
+		var bytes []string
+		remain := b.bitlen
+		for remain >= 8 {
+			bytes = append(bytes, "0xff")
+		}
+		if remain > 0 {
+			bytes = append(bytes, fmt.Sprintf("0x%X", remain))
+		}
+		fmt.Fprintf(&buf, " != [%d]byte{%s}\n", (b.bitlen+63)/64, strings.Join(bytes, ","))
+	}
+	fmt.Fprintf(&buf, " != 0x%x", uint64(1<<b.bitlen)-1)
 
 	return buf.String()
 }

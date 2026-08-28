@@ -41,7 +41,7 @@ func TestUnmarshalJSON(t *testing.T) {
 		t.Logf("%s", js.Bytes())
 		t.Fatal(err)
 	}
-	mp := make(map[string]interface{})
+	mp := make(map[string]any)
 	err = json.Unmarshal(js.Bytes(), &mp)
 	if err != nil {
 		t.Log(js.String())
@@ -65,7 +65,7 @@ func TestUnmarshalJSON(t *testing.T) {
 	if !ok {
 		t.Error(`"a_map" field doesn't exist`)
 	} else {
-		if m, ok := c.(map[string]interface{}); ok {
+		if m, ok := c.(map[string]any); ok {
 			if _, ok := m["cmplx"]; !ok {
 				t.Error(`"a_map.cmplx" doesn't exist`)
 			}
@@ -75,6 +75,29 @@ func TestUnmarshalJSON(t *testing.T) {
 	}
 
 	t.Logf("JSON: %s", js.Bytes())
+}
+
+func TestUnmarshalAsJSONNumericMapKeys(t *testing.T) {
+	var buf bytes.Buffer
+	enc := NewWriter(&buf)
+	enc.WriteMapHeader(2)
+	enc.WriteInt64(-5)
+	enc.WriteString("neg")
+	enc.WriteUint64(42)
+	enc.WriteString("pos")
+	enc.Flush()
+
+	var js bytes.Buffer
+	if _, err := UnmarshalAsJSON(&js, buf.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	mp := make(map[string]any)
+	if err := json.Unmarshal(js.Bytes(), &mp); err != nil {
+		t.Fatalf("unmarshal: %s — json: %s", err, js.String())
+	}
+	if mp["-5"] != "neg" || mp["42"] != "pos" {
+		t.Errorf("unexpected map: %v", mp)
+	}
 }
 
 func BenchmarkUnmarshalAsJSON(b *testing.B) {
