@@ -759,3 +759,41 @@ func BenchmarkSkipBytes(b *testing.B) {
 		}
 	}
 }
+
+func TestReadFloat64BytesFromInt(t *testing.T) {
+	testCases := []struct {
+		name     string
+		write    func(w *Writer) error
+		expected float64
+	}{
+		{"int64", func(w *Writer) error { return w.WriteInt64(500) }, 500.0},
+		{"negative_int", func(w *Writer) error { return w.WriteInt64(-42) }, -42.0},
+		{"fixint_zero", func(w *Writer) error { return w.WriteInt(0) }, 0.0},
+		{"uint64", func(w *Writer) error { return w.WriteUint64(99999) }, 99999.0},
+		{"string", func(w *Writer) error { return w.WriteString("162.5") }, 162.5},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			w := NewWriter(&buf)
+			if err := tc.write(w); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Flush(); err != nil {
+				t.Fatal(err)
+			}
+
+			got, left, err := ReadFloat64Bytes(buf.Bytes())
+			if err != nil {
+				t.Fatalf("ReadFloat64Bytes failed: %v", err)
+			}
+			if len(left) != 0 {
+				t.Errorf("leftover bytes: %d", len(left))
+			}
+			if got != tc.expected {
+				t.Errorf("got %f, want %f", got, tc.expected)
+			}
+		})
+	}
+}

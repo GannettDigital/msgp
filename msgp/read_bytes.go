@@ -331,24 +331,25 @@ func ReadNilBytes(b []byte) ([]byte, error) {
 //   - [ErrShortBytes] (too few bytes)
 //   - [TypeError] (not a float64)
 func ReadFloat64Bytes(b []byte) (f float64, o []byte, err error) {
-	if len(b) < 9 {
-		if len(b) >= 5 && b[0] == mfloat32 {
-			var tf float32
-			tf, o, err = ReadFloat32Bytes(b)
-			f = float64(tf)
-			return
-		}
-		err = ErrShortBytes
-		return
+	if len(b) < 1 {
+		return 0, nil, ErrShortBytes
 	}
 
 	if b[0] != mfloat64 {
-		if b[0] == mfloat32 {
+		switch getType(b[0]) {
+		case Float32Type:
 			var tf float32
 			tf, o, err = ReadFloat32Bytes(b)
-			f = float64(tf)
-			return
-		} else if isfixstr(b[0]) || b[0] == mstr8 || b[0] == mstr16 || b[0] == mstr32 {
+			return float64(tf), o, err
+		case IntType:
+			var i int64
+			i, o, err = ReadInt64Bytes(b)
+			return float64(i), o, err
+		case UintType:
+			var u uint64
+			u, o, err = ReadUint64Bytes(b)
+			return float64(u), o, err
+		case StrType:
 			var sf string
 			sf, o, err = ReadStringBytes(b)
 			if err != nil {
@@ -359,11 +360,14 @@ func ReadFloat64Bytes(b []byte) (f float64, o []byte, err error) {
 				f, err = strconv.ParseFloat(sf, 64)
 			}
 			return
+		default:
+			return 0, nil, badPrefix(Float64Type, b[0])
 		}
-		err = badPrefix(Float64Type, b[0])
-		return
 	}
 
+	if len(b) < 9 {
+		return 0, nil, ErrShortBytes
+	}
 	f = math.Float64frombits(getMuint64(b))
 	o = b[9:]
 	return

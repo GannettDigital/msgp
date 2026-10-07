@@ -586,22 +586,25 @@ func (m *Reader) ReadNil() error {
 // it will be up-cast to a float64.)
 func (m *Reader) ReadFloat64() (f float64, err error) {
 	var p []byte
-	p, err = m.R.Peek(9)
+	p, err = m.R.Peek(1)
 	if err != nil {
-		// we'll allow a conversion from float32 to float64,
-		// since we don't lose any precision
-		if err == io.EOF && len(p) > 0 && p[0] == mfloat32 {
-			ef, err := m.ReadFloat32()
-			return float64(ef), err
-		}
 		return
 	}
 	if p[0] != mfloat64 {
-		// see above
-		if p[0] == mfloat32 {
-			ef, err := m.ReadFloat32()
+		switch getType(p[0]) {
+		case Float32Type:
+			var ef float32
+			ef, err = m.ReadFloat32()
 			return float64(ef), err
-		} else if isfixstr(p[0]) || p[0] == mstr8 || p[0] == mstr16 || p[0] == mstr32 {
+		case IntType:
+			var i int64
+			i, err = m.ReadInt64()
+			return float64(i), err
+		case UintType:
+			var u uint64
+			u, err = m.ReadUint64()
+			return float64(u), err
+		case StrType:
 			var sf string
 			sf, err = m.ReadString()
 			if err != nil {
@@ -612,8 +615,13 @@ func (m *Reader) ReadFloat64() (f float64, err error) {
 				f, err = strconv.ParseFloat(sf, 64)
 			}
 			return
+		default:
+			err = badPrefix(Float64Type, p[0])
+			return
 		}
-		err = badPrefix(Float64Type, p[0])
+	}
+	p, err = m.R.Peek(9)
+	if err != nil {
 		return
 	}
 	f = math.Float64frombits(getMuint64(p))

@@ -1065,3 +1065,39 @@ func TestCopyNext(t *testing.T) {
 		t.Fatalf("not equal! %v, %v", buf.Bytes(), w.Bytes())
 	}
 }
+
+func TestReadFloat64FromInt(t *testing.T) {
+	testCases := []struct {
+		name     string
+		write    func(w *Writer) error
+		expected float64
+	}{
+		{"int64", func(w *Writer) error { return w.WriteInt64(500) }, 500.0},
+		{"negative_int", func(w *Writer) error { return w.WriteInt64(-42) }, -42.0},
+		{"fixint_zero", func(w *Writer) error { return w.WriteInt(0) }, 0.0},
+		{"uint64", func(w *Writer) error { return w.WriteUint64(99999) }, 99999.0},
+		{"string", func(w *Writer) error { return w.WriteString("162.5") }, 162.5},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			w := NewWriter(&buf)
+			if err := tc.write(w); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Flush(); err != nil {
+				t.Fatal(err)
+			}
+
+			r := NewReader(bytes.NewReader(buf.Bytes()))
+			got, err := r.ReadFloat64()
+			if err != nil {
+				t.Fatalf("ReadFloat64 failed: %v", err)
+			}
+			if got != tc.expected {
+				t.Errorf("got %f, want %f", got, tc.expected)
+			}
+		})
+	}
+}
