@@ -1216,8 +1216,39 @@ func (m *Reader) ReadStringAsBytes(scratch []byte) (b []byte, err error) {
 		}
 		read = int64(big.Uint32(p[1:]))
 	default:
-		err = badPrefix(StrType, lead)
-		return
+		switch getType(lead) {
+		case IntType:
+			var i int64
+			i, err = m.ReadInt64()
+			if err != nil {
+				return
+			}
+			return strconv.AppendInt(scratch[:0], i, 10), nil
+		case UintType:
+			var u uint64
+			u, err = m.ReadUint64()
+			if err != nil {
+				return
+			}
+			return strconv.AppendUint(scratch[:0], u, 10), nil
+		case Float64Type:
+			var f float64
+			f, err = m.ReadFloat64()
+			if err != nil {
+				return
+			}
+			return strconv.AppendFloat(scratch[:0], f, 'f', -1, 64), nil
+		case Float32Type:
+			var f float32
+			f, err = m.ReadFloat32()
+			if err != nil {
+				return
+			}
+			return strconv.AppendFloat(scratch[:0], float64(f), 'f', -1, 32), nil
+		default:
+			err = badPrefix(StrType, lead)
+			return
+		}
 	}
 fill:
 	if uint64(read) > m.GetMaxStringLength() {
@@ -1311,8 +1342,27 @@ func (m *Reader) ReadString() (s string, err error) {
 		}
 		read = int64(big.Uint32(p[1:]))
 	default:
-		err = badPrefix(StrType, lead)
-		return
+		switch getType(lead) {
+		case IntType:
+			var i int64
+			i, err = m.ReadInt64()
+			return strconv.FormatInt(i, 10), err
+		case UintType:
+			var u uint64
+			u, err = m.ReadUint64()
+			return strconv.FormatUint(u, 10), err
+		case Float64Type:
+			var f float64
+			f, err = m.ReadFloat64()
+			return strconv.FormatFloat(f, 'f', -1, 64), err
+		case Float32Type:
+			var f float32
+			f, err = m.ReadFloat32()
+			return strconv.FormatFloat(float64(f), 'f', -1, 32), err
+		default:
+			err = badPrefix(StrType, lead)
+			return
+		}
 	}
 fill:
 	if read == 0 {

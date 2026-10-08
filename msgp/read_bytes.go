@@ -1014,8 +1014,30 @@ func ReadStringZC(b []byte) (v []byte, o []byte, err error) {
 //   - [TypeError] (not 'str' type)
 //   - [InvalidPrefixError]
 func ReadStringBytes(b []byte) (string, []byte, error) {
-	v, o, err := ReadStringZC(b)
-	return string(v), o, err
+	if len(b) < 1 {
+		return "", nil, ErrShortBytes
+	}
+	lead := b[0]
+	if isfixstr(lead) || lead == mstr8 || lead == mstr16 || lead == mstr32 {
+		v, o, err := ReadStringZC(b)
+		return string(v), o, err
+	}
+	switch getType(lead) {
+	case IntType:
+		i, o, err := ReadInt64Bytes(b)
+		return strconv.FormatInt(i, 10), o, err
+	case UintType:
+		u, o, err := ReadUint64Bytes(b)
+		return strconv.FormatUint(u, 10), o, err
+	case Float64Type:
+		f, o, err := ReadFloat64Bytes(b)
+		return strconv.FormatFloat(f, 'f', -1, 64), o, err
+	case Float32Type:
+		f, o, err := ReadFloat32Bytes(b)
+		return strconv.FormatFloat(float64(f), 'f', -1, 32), o, err
+	default:
+		return "", nil, TypeError{Method: StrType, Encoded: getType(lead)}
+	}
 }
 
 // ReadStringAsBytes reads a 'str' object
@@ -1030,10 +1052,52 @@ func ReadStringBytes(b []byte) (string, []byte, error) {
 //   - [TypeError] (not 'str' type)
 //   - [InvalidPrefixError] (unknown type marker)
 func ReadStringAsBytes(b []byte, scratch []byte) (v []byte, o []byte, err error) {
-	var tmp []byte
-	tmp, o, err = ReadStringZC(b)
-	v = append(scratch[:0], tmp...)
-	return
+	if len(b) < 1 {
+		return nil, nil, ErrShortBytes
+	}
+	lead := b[0]
+	if isfixstr(lead) || lead == mstr8 || lead == mstr16 || lead == mstr32 {
+		var tmp []byte
+		tmp, o, err = ReadStringZC(b)
+		v = append(scratch[:0], tmp...)
+		return
+	}
+	switch getType(lead) {
+	case IntType:
+		var i int64
+		i, o, err = ReadInt64Bytes(b)
+		if err != nil {
+			return
+		}
+		v = strconv.AppendInt(scratch[:0], i, 10)
+		return
+	case UintType:
+		var u uint64
+		u, o, err = ReadUint64Bytes(b)
+		if err != nil {
+			return
+		}
+		v = strconv.AppendUint(scratch[:0], u, 10)
+		return
+	case Float64Type:
+		var f float64
+		f, o, err = ReadFloat64Bytes(b)
+		if err != nil {
+			return
+		}
+		v = strconv.AppendFloat(scratch[:0], f, 'f', -1, 64)
+		return
+	case Float32Type:
+		var f float32
+		f, o, err = ReadFloat32Bytes(b)
+		if err != nil {
+			return
+		}
+		v = strconv.AppendFloat(scratch[:0], float64(f), 'f', -1, 32)
+		return
+	default:
+		return nil, nil, TypeError{Method: StrType, Encoded: getType(lead)}
+	}
 }
 
 // ReadComplex128Bytes reads a complex128

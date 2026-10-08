@@ -1101,3 +1101,41 @@ func TestReadFloat64FromInt(t *testing.T) {
 		})
 	}
 }
+
+func TestReadStringFromIntAndFloat(t *testing.T) {
+	testCases := []struct {
+		name     string
+		write    func(w *Writer) error
+		expected string
+	}{
+		{"int64", func(w *Writer) error { return w.WriteInt64(500) }, "500"},
+		{"negative_int", func(w *Writer) error { return w.WriteInt64(-42) }, "-42"},
+		{"fixint_zero", func(w *Writer) error { return w.WriteInt(0) }, "0"},
+		{"uint64", func(w *Writer) error { return w.WriteUint64(99999) }, "99999"},
+		{"float64", func(w *Writer) error { return w.WriteFloat64(162.5) }, "162.5"},
+		{"float32", func(w *Writer) error { return w.WriteFloat32(12.5) }, "12.5"},
+		{"string", func(w *Writer) error { return w.WriteString("hello") }, "hello"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			w := NewWriter(&buf)
+			if err := tc.write(w); err != nil {
+				t.Fatal(err)
+			}
+			if err := w.Flush(); err != nil {
+				t.Fatal(err)
+			}
+
+			r := NewReader(bytes.NewReader(buf.Bytes()))
+			got, err := r.ReadString()
+			if err != nil {
+				t.Fatalf("ReadString failed: %v", err)
+			}
+			if got != tc.expected {
+				t.Errorf("got %q, want %q", got, tc.expected)
+			}
+		})
+	}
+}
