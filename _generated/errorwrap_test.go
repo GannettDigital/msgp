@@ -54,9 +54,9 @@ func (o *dodgifierBuf) Write(b []byte) (n int, err error) {
 	ilen := len(b)
 	if msgp.NextType(b) == msgp.StrType {
 		if o.strIdx == o.dodgifyString {
-			// Fool msgp into thinking this value is a fixint. msgp will throw
+			// Fool msgp into thinking this value is a bool. msgp will throw
 			// a type error for this value.
-			b[0] = 1
+			b[0] = 0xc3
 		}
 		o.strIdx++
 	}
@@ -211,7 +211,7 @@ func diffstrs(a, b []string) (ok bool, as, bs []string) {
 	return len(as)+len(bs) == 0, as, bs
 }
 
-var errPrefix = `msgp: attempted to decode type "int" with method for "str"`
+var errPrefix = `msgp: attempted to decode type "bool" with method for "str"`
 
 func expectedAsTuple() []string {
 	var out []string
